@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="UnattendedHostPersistenceState">
+    <option name="openedFilesInfos">
+      <list>
+        <OpenedFileInfo>
+          <option name="caretOffset" value="113" />
+          <option name="fileUrl" value="file://$PROJECT_DIR$/src/main/pbd.go" />
+        </OpenedFileInfo>
+        <OpenedFileInfo>
+          <option name="caretOffset" value="101" />
+          <option name="fileUrl" value="file://$PROJECT_DIR$/src/main/viewd.go" />
+        </OpenedFileInfo>
+        <OpenedFileInfo>
+          <option name="caretOffset" value="9699" />
+          <option name="fileUrl" value="file://$PROJECT_DIR$/src/lockservice/test_test.go" />
+        </OpenedFileInfo>
+        <OpenedFileInfo>
+          <option name="caretOffset" value="0" />
+          <option name="fileUrl" value="file://$PROJECT_DIR$/src/lockservice/server.go" />
+        </OpenedFileInfo>
+        <OpenedFileInfo>
+          <option name="caretOffset" value="427" />
+          <option name="fileUrl" value="file://$PROJECT_DIR$/src/main/pbc.go" />
+        </OpenedFileInfo>
+      </list>
+    </option>
+  </component>
+</project>
