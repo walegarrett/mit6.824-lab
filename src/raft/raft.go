@@ -17,12 +17,38 @@ package raft
 //   in the same server.
 //
 
-import "sync"
-import "sync/atomic"
-import "6.824/labrpc"
+import (
+	"bytes"
+	"fmt"
+	"log"
+	"math/rand"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"6.824/labgob"
+	"6.824/labrpc"
+)
 
 // import "bytes"
 // import "../labgob"
+
+// 节点的角色
+type Role int
+const (
+	Follower Role = 0
+	Candidate Role = 1
+	Leader Role = 2
+)
+
+// 相关时间间隔和超时设定
+const (
+	ElectionTimeout = time.Millisecond * 300 // 选举超时，必须大于心跳间隔
+	HeartBeatTimeout = time.Millisecond * 150 // leader心跳超时
+	ApplyInterval = time.Millisecond * 100 // apply log间隔
+	RPCTimeout = time.Millisecond * 100
+	MaxLockTime = time.Millisecond * 10 // debug
+)
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -41,6 +67,13 @@ type ApplyMsg struct {
 	CommandIndex int
 }
 
+// 日志条目的定义
+type LogEntry struct {
+	Term int // 当前log的任期
+	Idx int // 当前日志条目在日志条目集中的索引，注意，这个日志条目不一定在logEntries数组中，因为有可能系统进行了快照
+	Command interface{} // 当前log中存储的应用层命令
+}
+
 //
 // A Go object implementing a single Raft peer.
 //
@@ -55,18 +88,106 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
+	role Role // 当前Raft节点的角色
+
+	// 需要进行持久化的几个属性
+	term int // 当前任期
+	voteFor int // 向哪个server候选人投票
+	logEntries []LogEntry // 日志条目集
+
+	// server的两个易失属性
+	commitIndex int // 已知的最大的已经被提交的日志条目索引号
+	lastApplied int // 当前server被应用到状态机的日志条目索引号
+
+	// 当前server作为领导人有的两个易失属性
+	nextIndex []int // 对于每一个服务器，需要发送给他的下一个日志条目的索引值（初始化为领导人最后索引值加一）
+	matchIndex []int // 对于每一个服务器，已经复制给他的日志的最高索引值
+
+	// 用于snapshot的属性
+	lastSnapshotIndex int // 快照中的index
+	lastSnapshotTerm int // 快照中的term
+
+	// 相关定时器的定义
+	electionTimer *time.Timer
+	appendEntriesTimers []*time.Timer
+	applyTimer *time.Timer
+
+	// 通道相关定义
+	notifyApplyCh chan struct{} // 通知应用层进行apply
+	stopCh chan struct{}
+	applyCh chan ApplyMsg
+
+	// debug相关属性
+	DebugLog bool
+	lockStart time.Time
+	lockEnd time.Time
+	lockName string
+	gid int
 }
 
+// 自定义lock与unlock
+func (rf *Raft) lock(m string){
+	rf.mu.Lock()
+	rf.lockStart = time.Now()
+	rf.lockName = m
+}
+
+func (rf *Raft) unlock(m string) {
+	rf.lockEnd = time.Now()
+	rf.lockName = ""
+	duration := rf.lockEnd.Sub(rf.lockStart)
+	if rf.lockName != "" && duration > MaxLockTime {
+		rf.log("lock too long:%s:%s:iskill:%v", m, duration, rf.killed())
+	}
+	rf.mu.Unlock()
+}
+
+// 输出日志
+func (rf *Raft) log(format string, a ...interface{}){
+	if !rf.DebugLog {
+		return
+	}
+	// 获取当前server的最新日志的任期和索引
+	term, idx := rf.lastLogTermIndex()
+
+	r := fmt.Sprintf(format, a...)
+	s := fmt.Sprintf("gid:%d, me:%d, role:%v, term:%d, commitIdx:%v, snidx:%d, apply:%v, matchidx:%v, nextidx:%+v, lastlogterm:%d, idx:%d",
+					  rf.gid, rf.me, rf.role, rf.term, rf.commitIndex, rf.lastSnapshotIndex, rf.lastApplied, rf.matchIndex, rf.nextIndex, term, idx)
+	log.Printf("%s:log:%s\n", s, r)
+}
+
+
+// 获取当前server的最新日志条目所属任期和日志条目索引
+func (rf *Raft) lastLogTermIndex() (int, int) {
+	term := rf.logEntries[len(rf.logEntries) - 1].Term
+	// 日志条目索引是快照的索引加上日志条目集的长度减一
+	index := rf.lastSnapshotIndex + len(rf.logEntries) - 1;
+	return term, index
+}
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-
-	var term int
-	var isleader bool
 	// Your code here (2A).
-	return term, isleader
+	rf.lock("get state")
+	defer rf.unlock("get state")
+	return rf.term, rf.role == Leader
 }
 
+// 获取持久化的数据
+func (rf *Raft) GetPersistData() []byte {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	// 持久化相关的数据
+	e.Encode(rf.term)
+	e.Encode(rf.voteFor)
+	e.Encode(rf.commitIndex)
+	e.Encode(rf.lastSnapshotIndex)
+	e.Encode(rf.lastSnapshotTerm)
+	e.Encode(rf.logEntries)
+
+	data := w.Bytes()
+	return data
+}
 //
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.
@@ -74,13 +195,8 @@ func (rf *Raft) GetState() (int, bool) {
 //
 func (rf *Raft) persist() {
 	// Your code here (2C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
+	data := rf.GetPersistData()
+	rf.persister.SaveRaftState(data)
 }
 
 //
@@ -90,76 +206,27 @@ func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
-	// Your code here (2C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
-}
+	
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
 
-//
-// example RequestVote RPC arguments structure.
-// field names must start with capital letters!
-//
-type RequestVoteArgs struct {
-	// Your data here (2A, 2B).
-}
+	var term int
+	var voteFor int
+	var logs []LogEntry
+	var commitIndex, lastSnapshotIndex, lastSnapshotTerm int
 
-//
-// example RequestVote RPC reply structure.
-// field names must start with capital letters!
-//
-type RequestVoteReply struct {
-	// Your data here (2A).
-}
-
-//
-// example RequestVote RPC handler.
-//
-func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	// Your code here (2A, 2B).
-}
-
-//
-// example code to send a RequestVote RPC to a server.
-// server is the index of the target server in rf.peers[].
-// expects RPC arguments in args.
-// fills in *reply with RPC reply, so caller should
-// pass &reply.
-// the types of the args and reply passed to Call() must be
-// the same as the types of the arguments declared in the
-// handler function (including whether they are pointers).
-//
-// The labrpc package simulates a lossy network, in which servers
-// may be unreachable, and in which requests and replies may be lost.
-// Call() sends a request and waits for a reply. If a reply arrives
-// within a timeout interval, Call() returns true; otherwise
-// Call() returns false. Thus Call() may not return for a while.
-// A false return can be caused by a dead server, a live server that
-// can't be reached, a lost request, or a lost reply.
-//
-// Call() is guaranteed to return (perhaps after a delay) *except* if the
-// handler function on the server side does not return.  Thus there
-// is no need to implement your own timeouts around Call().
-//
-// look at the comments in ../labrpc/labrpc.go for more details.
-//
-// if you're having trouble getting RPC to work, check that you've
-// capitalized all field names in structs passed over RPC, and
-// that the caller passes the address of the reply struct with &, not
-// the struct itself.
-//
-func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	return ok
+	if d.Decode(&term) != nil || d.Decode(&voteFor) != nil ||
+		d.Decode(&commitIndex) != nil || d.Decode(&lastSnapshotIndex) != nil ||
+		d.Decode(&lastSnapshotTerm) != nil || d.Decode(&logs) != nil {
+		log.Fatal("rf read persisit err")
+	}else {
+		rf.term = term
+		rf.voteFor = voteFor
+		rf.commitIndex = commitIndex
+		rf.lastSnapshotIndex = lastSnapshotIndex
+		rf.lastSnapshotTerm = lastSnapshotTerm
+		rf.logEntries = logs
+	}
 }
 
 //
@@ -177,12 +244,27 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
-
+	rf.lock("start")
+	term := rf.term
+	isLeader := rf.role == Leader
+	// 获取最新的日志条目索引，此时考虑做了快照的情况
+	_, lastIndex := rf.lastLogTermIndex()
+	// 日志条目索引需要自增一表示将要填充新日志的位置
+	index := lastIndex + 1
 	// Your code here (2B).
-
+	if isLeader {
+		rf.logEntries = append(rf.logEntries, LogEntry{
+			Term: rf.term,
+			Command: command,
+			Idx: index,
+		})
+		rf.matchIndex[rf.me] = index
+		// 持久化
+		rf.persist()
+	}
+	// 重置appendEntries的定时器为0表示立即运行appendEntries的定时任务
+	rf.resetHeartBeatTimers()
+	rf.unlock("start")
 	return index, term, isLeader
 }
 
@@ -200,6 +282,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
+	close(rf.stopCh)
 }
 
 func (rf *Raft) killed() bool {
@@ -207,6 +290,11 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
+// 随机一个选举超时时间
+func randElectionTimeout() time.Duration {
+	r := time.Duration(rand.Int63()) % ElectionTimeout
+	return ElectionTimeout + r
+}
 //
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
@@ -219,16 +307,52 @@ func (rf *Raft) killed() bool {
 // for any long-running work.
 //
 func Make(peers []*labrpc.ClientEnd, me int,
-	persister *Persister, applyCh chan ApplyMsg) *Raft {
+	persister *Persister, applyCh chan ApplyMsg, gid ...int) *Raft {
+		
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
+	rf.applyCh = applyCh
+
+	rf.DebugLog = false
+	if len(gid) != 0 {
+		rf.gid = gid[0]
+	} else {
+		rf.gid = -1
+	}
+
+	rf.stopCh = make(chan struct{})
+	rf.term = 0
+	rf.voteFor = -1 // 没给任何人投票
+	rf.role = Follower // 初始为跟随者
+	rf.logEntries = make([]LogEntry, 1) // 索引0用于存放lastSnapshot
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+
+	rf.electionTimer = time.NewTimer(randElectionTimeout())
+	rf.appendEntriesTimers = make([]*time.Timer, len(rf.peers))
+	for peerIdx, _ := range rf.peers {
+		rf.appendEntriesTimers[peerIdx] = time.NewTimer(HeartBeatTimeout)
+	}
+	rf.applyTimer = time.NewTimer(ApplyInterval)
+
+	rf.notifyApplyCh = make(chan struct{}, 100)
+
+	// 异步发起投票
+	go func ()  {
+		for {
+			select {
+			case <-rf.stopCh:
+				return
+			case <-rf.electionTimer.C: // 投票定时时间到，发起投票
+				rf.startElection()
+			}
+		}
+	}()
 
 	return rf
 }
