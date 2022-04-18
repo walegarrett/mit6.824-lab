@@ -392,7 +392,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			}
 		}
 	}()
-
+	
 	// 异步发起投票
 	go func ()  {
 		for {
@@ -404,7 +404,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			}
 		}
 	}()
-
+	
 	// leader发送appendEntries rpc请求，发送日志
 	for peerIdx, _ := range peers {
 		if peerIdx == rf.me {
