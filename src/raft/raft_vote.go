@@ -243,7 +243,6 @@ func (rf * Raft) startElection() {
 	}
 
 	rf.unlock("start election 2")
-
 }
 
 // 修改当前server的角色

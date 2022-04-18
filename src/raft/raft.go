@@ -295,6 +295,43 @@ func randElectionTimeout() time.Duration {
 	r := time.Duration(rand.Int63()) % ElectionTimeout
 	return ElectionTimeout + r
 }
+
+// 开始apply log
+func (rf *Raft) startApplyLogs() {
+	defer rf.applyTimer.Reset(ApplyInterval)
+
+	rf.lock("applyLogsPhase1")
+	var msgs []ApplyMsg
+	if rf.lastApplied < rf.lastSnapshotIndex {
+		msgs = make([]ApplyMsg, 0, 1)
+		msgs = append(msgs, ApplyMsg{
+			CommandValid: false,
+			Command: "installSnapShot",
+			CommandIndex: rf.lastSnapshotIndex,
+		})
+	} else if rf.commitIndex <= rf.lastApplied {
+		msgs = make([]ApplyMsg, 0)
+	} else {
+		rf.log("rfapply")
+		msgs = make([]ApplyMsg, 0, rf.commitIndex-rf.lastApplied)
+		for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
+			msgs = append(msgs, ApplyMsg{
+				CommandValid: true,
+				Command: rf.logEntries[rf.getRealIdxByLogIndex(i)].Command,
+				CommandIndex: i,
+			})
+		}
+	}
+	rf.unlock("applyLogsPhase1")
+
+	for _, msg := range msgs {
+		rf.applyCh <- msg
+		rf.lock("applyLogsPhase2")
+		rf.log("send applych idx:%d", msg.CommandIndex)
+		rf.lastApplied = msg.CommandIndex
+		rf.unlock("applyLogsPhase2")
+	}
+}
 //
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
@@ -342,6 +379,20 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	rf.notifyApplyCh = make(chan struct{}, 100)
 
+	// apply log
+	go func() {
+		for {
+			select {
+			case <- rf.stopCh:
+				return
+			case <-rf.applyTimer.C:
+				rf.notifyApplyCh <- struct{}{}
+			case <-rf.notifyApplyCh:
+				rf.startApplyLogs()
+			}
+		}
+	}()
+
 	// 异步发起投票
 	go func ()  {
 		for {
@@ -354,5 +405,21 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		}
 	}()
 
+	// leader发送appendEntries rpc请求，发送日志
+	for peerIdx, _ := range peers {
+		if peerIdx == rf.me {
+			continue
+		}
+		go func (index int)  {
+			for {
+				select{
+				case <-rf.stopCh:
+					return
+				case <-rf.appendEntriesTimers[index].C:
+					rf.appendEntriesToPeer(index)
+				}
+			}
+		}(peerIdx)
+	}
 	return rf
 }
