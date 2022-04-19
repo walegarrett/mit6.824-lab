@@ -1,13 +1,18 @@
 package kvraft
 
 import (
-	"6.824/labgob"
-	"6.824/labrpc"
-	"6.824/raft"
+	"fmt"
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
+
+	"6.824/labgob"
+	"6.824/labrpc"
+	"6.824/raft"
 )
+const WaitCmdTimeout = time.Millisecond * 500
+const MaxLockTime = time.Millisecond * 10
 
 const Debug = 0
 
@@ -22,6 +27,15 @@ type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+
+	// Clerk通过（ClientId，MsgId）唯一标识了一个请求
+
+	MsgId msgId
+	ReqId int64
+	ClientId int64
+	Key string
+	Value string
+	Method string
 }
 
 type KVServer struct {
@@ -34,6 +48,35 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+
+
+	// debug
+	DebugLog bool
+	lockStart time.Time
+	lockEnd time.Time
+	lockName string
+}
+
+func (kv *KVServer) lock(m string) {
+	kv.mu.Lock()
+	kv.lockStart = time.Now()
+	kv.lockName = m
+}
+
+func (kv *KVServer) unlock(m string) {
+	kv.lockEnd = time.Now()
+	duration := kv.lockEnd.Sub(kv.lockStart)
+	kv.lockName = ""
+	kv.mu.Unlock()
+	if duration > MaxLockTime {
+		kv.log(fmt.Sprintf("lock too long:%s:%s\n", m, duration))
+	}
+}
+
+func (kv *KVServer) log(m string) {
+	if kv.DebugLog {
+		log.Printf("server me: %d, log:%s", kv.me, m)
+	}
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
