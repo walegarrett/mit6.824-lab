@@ -146,6 +146,9 @@ func (sm *ShardMaster) adjustConfig(config *Config) {
 			}
 		}
 	} else if len(config.Groups) <= NShards {
+		// 假设分片数组Shards为：0,1,2,2,3,2,3,2,3,4 共10个分片，总共有5组，组号分别是0-4
+		// 根据下述公式计算：avg = 2，otherShardsCount = 0
+
 		// 组的数量小于分片的数量，需要将多余的分片平均分到每个组中
 		avg := NShards / len(config.Groups) // 每组负责的分片数量
 		// 每个 gid 分 avg 个 shard，这里计算取余的结果，因为/运算是不精确的，会丢少值
@@ -239,6 +242,8 @@ func (sm *ShardMaster) adjustConfig(config *Config) {
 
 	} else {
 		// len(config.Groups) > NShards
+
+		// 假设分片数组Shards为：0,1,2,1,3,4,5,6,2,8
 		// 组数大于分片数，也就是说会有多余的组，每个组最多负责一个分片
 		gids := make(map[int]int)
 		// 存储没有分配组的分片
