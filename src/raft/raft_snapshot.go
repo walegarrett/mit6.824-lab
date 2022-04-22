@@ -24,6 +24,29 @@ type InstallSnapshotReply struct {
 	Term int // 当前任期号，便于领导人更新自己
 }
 
+func (rf *Raft) SavePersistAndSnapshot(logIndex int, snapshotData []byte) {
+	rf.lock("save persist snapshot")
+	rf.log("save persist snapshot logindex:%d", logIndex)
+	defer rf.unlock("save persist snapshot")
+
+	if logIndex <= rf.lastSnapshotIndex {
+		return
+	}
+
+	if logIndex > rf.commitIndex {
+		panic("logindex > rf.commitIndex")
+	}
+
+	rf.log("befor save persist snapshot:%d, lastSnapshotIndex:%d, logsLen:%d, logs:%+v",
+			logIndex, rf.lastSnapshotIndex, len(rf.logEntries), rf.logEntries)
+	
+	lastLog := rf.getLogByIndex(logIndex)
+	rf.logEntries = rf.logEntries[rf.getRealIdxByLogIndex(logIndex):]
+	rf.lastSnapshotIndex = logIndex
+	rf.lastSnapshotTerm = lastLog.Term
+	persistData := rf.GetPersistData()
+	rf.persister.SaveStateAndSnapshot(persistData, snapshotData)
+}
 // server处理leader发送的install snapshot请求
 func (rf *Raft) InstallSnapshot(args *InstallSnapshoArgs, reply *InstallSnapshotReply) {
 	rf.lock("install snapshot")
