@@ -8,11 +8,13 @@ package shardkv
 // talks to the group that holds the key's shard.
 //
 
-import "6.824/labrpc"
-import "crypto/rand"
-import "math/big"
-import "6.824/shardmaster"
-import "time"
+import (
+	"crypto/rand"
+	"math/big"
+	"time"
+	"6.824/labrpc"
+	"6.824/shardmaster"
+)
 
 //
 // which shard is a key in?
@@ -40,6 +42,15 @@ type Clerk struct {
 	config   shardmaster.Config
 	make_end func(string) *labrpc.ClientEnd
 	// You will have to modify this struct.
+	clientId int64
+}
+
+func (ck *Clerk) log(format string, val ...interface{}) {
+	// fmt.Printf(format + "\n", val...)
+}
+
+func (ck *Clerk) getConfigNum() int {
+	return ck.config.Num
 }
 
 //
@@ -56,6 +67,7 @@ func MakeClerk(masters []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 	ck.sm = shardmaster.MakeClerk(masters)
 	ck.make_end = make_end
 	// You'll have to add code here.
+	ck.clientId = nrand()
 	return ck
 }
 
@@ -69,9 +81,16 @@ func (ck *Clerk) Get(key string) string {
 	args := GetArgs{}
 	args.Key = key
 
+	args.MsgId = nrand()
+	args.ClientId = ck.clientId
+
 	for {
-		shard := key2shard(key)
-		gid := ck.config.Shards[shard]
+		args.ConfigNum = ck.getConfigNum()
+
+		shard := key2shard(key) // 该key所属于的分片
+		gid := ck.config.Shards[shard] // 获取该分片所属于的组
+
+		// 向这个分片的所有副本服务器发送命令
 		if servers, ok := ck.config.Groups[gid]; ok {
 			// try each server for the shard.
 			for si := 0; si < len(servers); si++ {
@@ -89,7 +108,7 @@ func (ck *Clerk) Get(key string) string {
 		}
 		time.Sleep(100 * time.Millisecond)
 		// ask master for the latest configuration.
-		ck.config = ck.sm.Query(-1)
+		ck.config = ck.sm.Query(ck.config.Num + 1)
 	}
 
 	return ""
@@ -105,9 +124,16 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	args.Value = value
 	args.Op = op
 
+	args.ClientId = ck.clientId
+	args.MsgId = nrand()
+
 	for {
-		shard := key2shard(key)
-		gid := ck.config.Shards[shard]
+		args.ConfigNum = ck.getConfigNum()
+
+		shard := key2shard(key) // 该key所属于的分片
+		gid := ck.config.Shards[shard] // 获取该分片所属于的组
+
+		// 向这个分片的所有副本服务器发送命令
 		if servers, ok := ck.config.Groups[gid]; ok {
 			for si := 0; si < len(servers); si++ {
 				srv := ck.make_end(servers[si])
@@ -124,7 +150,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		}
 		time.Sleep(100 * time.Millisecond)
 		// ask master for the latest configuration.
-		ck.config = ck.sm.Query(-1)
+		ck.config = ck.sm.Query(ck.config.Num + 1)
 	}
 }
 

@@ -12,6 +12,7 @@ import "math/big"
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// Your data here.
+	clientId int64
 }
 
 func nrand() int64 {
@@ -25,12 +26,22 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// Your code here.
+	ck.clientId = nrand()
 	return ck
 }
 
+func (ck *Clerk) genMsgId() msgId {
+	return msgId(nrand())
+}
+
+// 获取最新的配置
 func (ck *Clerk) Query(num int) Config {
 	args := &QueryArgs{}
 	// Your code here.
+
+	args.ClientId = ck.clientId
+	args.MsgId = ck.genMsgId()
+
 	args.Num = num
 	for {
 		// try each known server.
@@ -45,9 +56,14 @@ func (ck *Clerk) Query(num int) Config {
 	}
 }
 
+// 添加新的副本组
 func (ck *Clerk) Join(servers map[int][]string) {
 	args := &JoinArgs{}
 	// Your code here.
+
+	args.ClientId = ck.clientId
+	args.MsgId = ck.genMsgId()
+
 	args.Servers = servers
 
 	for {
@@ -63,9 +79,14 @@ func (ck *Clerk) Join(servers map[int][]string) {
 	}
 }
 
+// 删除一个副本组
 func (ck *Clerk) Leave(gids []int) {
 	args := &LeaveArgs{}
 	// Your code here.
+
+	args.ClientId = ck.clientId
+	args.MsgId = ck.genMsgId()
+
 	args.GIDs = gids
 
 	for {
@@ -81,10 +102,15 @@ func (ck *Clerk) Leave(gids []int) {
 	}
 }
 
+// 将当前所有者的一个分片移交给另一个组
 func (ck *Clerk) Move(shard int, gid int) {
 	args := &MoveArgs{}
 	// Your code here.
-	args.Shard = shard
+
+	args.ClientId = ck.clientId
+	args.MsgId = ck.genMsgId()
+
+	args.Shard = shard // 分片Id
 	args.GID = gid
 
 	for {

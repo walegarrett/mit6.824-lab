@@ -1,16 +1,24 @@
 package shardkv
 
 // import "../shardmaster"
-import "6.824/labrpc"
-import "6.824/raft"
-import "sync"
-import "6.824/labgob"
+import (
+	"fmt"
+	"log"
+	"sync"
+	"sync/atomic"
+	"time"
+	"6.824/labgob"
+	"6.824/labrpc"
+	"6.824/raft"
+	"6.824/shardmaster"
+)
 
-type Op struct {
-	// Your definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
-}
+const (
+	PullConfigInterval = time.Millisecond * 100
+	PullShardsInterval = time.Millisecond * 200
+	WaitCmdTimeOut = time.Millisecond * 500
+	ReqCleanShardDataTimeOut = time.Millisecond * 500
+)
 
 type ShardKV struct {
 	mu           sync.Mutex
@@ -18,21 +26,77 @@ type ShardKV struct {
 	rf           *raft.Raft
 	applyCh      chan raft.ApplyMsg
 	make_end     func(string) *labrpc.ClientEnd
-	gid          int
+
+	gid          int // 当前server服务器所属的组
+
 	masters      []*labrpc.ClientEnd
 	maxraftstate int // snapshot if log grows this big
-
+	
 	// Your definitions here.
+
+	config shardmaster.Config // 最新的配置
+	oldConfig shardmaster.Config // 旧配置
+	notifyCh map[int64]chan NotifyMsg
+
+	// 每个分片的：clientId -> msgId map，记录客户端的消息，避免执行相同的命令
+	lastMsgIdx [shardmaster.NShards]map[int64]int64
+
+	ownShards map[int]bool // 分片属于当前组
+
+	// 每个分片的key/value数据
+	data [shardmaster.NShards]map[string]string 
+
+	waitShardIds map[int]bool // 某个分片是否需要更新
+	// configNum -> shard -> data，历史配置中的实际数据
+	historyShards map[int]map[int]MergeShardData
+
+	mck *shardmaster.Clerk
+
+	dead int32
+	stopCh chan struct{}
+	persister *raft.Persister
+	lastApplyIndex int
+	lastApplyTerm int
+
+	pullConfigTimer *time.Timer
+	pullShardsTimer *time.Timer
+
+	// debug
+	DebugLog bool
+	lockStart time.Time
+	lockEnd time.Time
+	lockName string
 }
 
-func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
-	// Your code here.
+func (kv *ShardKV) lock(m string) {
+	kv.mu.Lock()
+	kv.lockStart = time.Now()
+	kv.lockName = m
 }
 
-func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	// Your code here.
+func (kv *ShardKV) unlock(m string) {
+	kv.lockEnd = time.Now()
+	duration := kv.lockEnd.Sub(kv.lockStart)
+	kv.lockName = ""
+	kv.mu.Unlock()
+	if duration > time.Millisecond * 2 {
+		kv.log(fmt.Sprintf("lock too long:%s:%s\n", m, duration))
+	}
 }
 
+func (kv *ShardKV) log(m string) {
+	if kv.DebugLog {
+		log.Printf("server me: %d, gid: %d, config: %+v, waitid: %+v, log: %s", 
+					kv.me, kv.gid, kv.config, kv.waitShardIds, m)
+	}
+}
+// 判断一个客户端对同一个分片的请求命令是否重复了
+func (kv *ShardKV) isRepeated(shardId int, clientId int64, id int64) bool {
+	if val, ok := kv.lastMsgIdx[shardId][clientId]; ok {
+		return val == id
+	}
+	return false
+}
 //
 // the tester calls Kill() when a ShardKV instance won't
 // be needed again. you are not required to do anything
@@ -42,6 +106,14 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 func (kv *ShardKV) Kill() {
 	kv.rf.Kill()
 	// Your code here, if desired.
+	atomic.StoreInt32(&kv.dead, 1)
+	close(kv.stopCh)
+	kv.log("kill kv get")
+}
+
+func (kv *ShardKV) killed() bool {
+	z := atomic.LoadInt32(&kv.dead)
+	return z == 1
 }
 
 //
@@ -85,12 +157,108 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.masters = masters
 
 	// Your initialization code here.
+	kv.persister = persister
+	kv.mck = shardmaster.MakeClerk(kv.masters)
 
 	// Use something like this to talk to the shardmaster:
 	// kv.mck = shardmaster.MakeClerk(kv.masters)
 
 	kv.applyCh = make(chan raft.ApplyMsg)
-	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+	kv.rf = raft.Make(servers, me, persister, kv.applyCh, kv.gid)
+
+	kv.stopCh = make(chan struct{})
+
+	kv.DebugLog = false
+
+	kv.data = [shardmaster.NShards]map[string]string{}
+	for i, _ := range kv.data {
+		kv.data[i] = make(map[string]string)
+	}
+
+	kv.lastMsgIdx = [shardmaster.NShards]map[int64]int64{}
+	for i, _ := range kv.lastMsgIdx {
+		kv.lastMsgIdx[i] = make(map[int64]int64)
+	}
+
+	kv.waitShardIds = make(map[int]bool)
+	kv.historyShards = make(map[int]map[int]MergeShardData)
+	config := shardmaster.Config {
+		Num: 0,
+		Shards: [shardmaster.NShards]int{},
+		Groups: map[int][]string{},
+	}
+	kv.config = config
+	kv.oldConfig = config
+	
+	kv.readSnapShotData(kv.persister.ReadSnapshot())
+
+	kv.notifyCh = make(map[int64]chan NotifyMsg)
+
+	kv.pullConfigTimer = time.NewTimer(PullConfigInterval)
+	kv.pullShardsTimer = time.NewTimer(PullShardsInterval)
+
+	go kv.waitApplyCh()
+	go kv.pullConfig()
+	go kv.pullShards()
 
 	return kv
+}
+
+// 开启循环，拉取最新配置
+func (kv *ShardKV) pullConfig() {
+	for {
+		select {
+		case <-kv.stopCh:
+			return
+		case <-kv.pullConfigTimer.C:
+			_, isLeader := kv.rf.GetState()
+			if !isLeader {
+				kv.pullConfigTimer.Reset(PullConfigInterval)
+				break
+			}
+
+			kv.lock("pullConfig")
+			lastNum := kv.config.Num
+			kv.log(fmt.Sprintf("pull config get last: %d", lastNum))
+			kv.unlock("pullConfig")
+
+			// 查询master客户端，查找最新的配置
+			config := kv.mck.Query(lastNum + 1)
+			if config.Num == lastNum + 1 {
+				// 找到新的config
+				kv.log(fmt.Sprintf("pull config found config: %+v, lastNum: %d", config, lastNum))
+				kv.lock("pullConfig")
+				if len(kv.waitShardIds) == 0 && kv.config.Num + 1 == config.Num {
+					kv.log(fmt.Sprintf("pull config start config: %+v, lastNum: %d", config, lastNum))
+					kv.unlock("pullConfig")
+					kv.rf.Start(config.Copy())
+				} else {
+					kv.unlock("pullConfig")
+				}
+			}
+			kv.pullConfigTimer.Reset(PullConfigInterval)
+		}
+	}
+}
+
+// 判断配置是否是有效的，根据key计算出的分片来判断
+func (kv *ShardKV) configReady(configNum int, key string) Err {
+	if configNum == 0 || configNum != kv.config.Num {
+		kv.log("configReadyerr1")
+		return ErrWrongGroup
+	}
+
+	shardId := key2shard(key)
+
+	if _, ok := kv.ownShards[shardId]; !ok {
+		kv.log("configReadyerr2")
+		return ErrWrongGroup
+	}
+
+	if _, ok := kv.waitShardIds[shardId]; ok {
+		kv.log("configReadyerr3")
+		return ErrWrongGroup
+	}
+
+	return OK
 }
