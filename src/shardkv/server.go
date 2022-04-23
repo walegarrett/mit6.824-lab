@@ -25,10 +25,11 @@ type ShardKV struct {
 	me           int
 	rf           *raft.Raft
 	applyCh      chan raft.ApplyMsg
-	make_end     func(string) *labrpc.ClientEnd
+	make_end     func(string) *labrpc.ClientEnd // 根据serverId创建一个终端的函数
 
 	gid          int // 当前server服务器所属的组
 
+	// 用于维护配置的master的集群服务器
 	masters      []*labrpc.ClientEnd
 	maxraftstate int // snapshot if log grows this big
 	
@@ -41,20 +42,22 @@ type ShardKV struct {
 	// 每个分片的：clientId -> msgId map，记录客户端的消息，避免执行相同的命令
 	lastMsgIdx [shardmaster.NShards]map[int64]int64
 
-	ownShards map[int]bool // 分片属于当前组
+	ownShards map[int]bool // 分片是否属于当前组，属于当前组的所有分片
 
 	// 每个分片的key/value数据
 	data [shardmaster.NShards]map[string]string 
 
 	waitShardIds map[int]bool // 某个分片是否需要更新
-	// configNum -> shard -> data，历史配置中的实际数据
+
+	// configNum -> shard -> data，历史配置中的分片实际数据
 	historyShards map[int]map[int]MergeShardData
 
-	mck *shardmaster.Clerk
+	mck *shardmaster.Clerk // master客户端
 
 	dead int32
 	stopCh chan struct{}
 	persister *raft.Persister
+
 	lastApplyIndex int
 	lastApplyTerm int
 
@@ -164,6 +167,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	// kv.mck = shardmaster.MakeClerk(kv.masters)
 
 	kv.applyCh = make(chan raft.ApplyMsg)
+	// 一组中的所有server组成了raft集群系统，也就是说，
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh, kv.gid)
 
 	kv.stopCh = make(chan struct{})
@@ -211,6 +215,7 @@ func (kv *ShardKV) pullConfig() {
 		case <-kv.stopCh:
 			return
 		case <-kv.pullConfigTimer.C:
+			// 只有leader才会更新配置
 			_, isLeader := kv.rf.GetState()
 			if !isLeader {
 				kv.pullConfigTimer.Reset(PullConfigInterval)
@@ -224,6 +229,7 @@ func (kv *ShardKV) pullConfig() {
 
 			// 查询master客户端，查找最新的配置
 			config := kv.mck.Query(lastNum + 1)
+
 			if config.Num == lastNum + 1 {
 				// 找到新的config
 				kv.log(fmt.Sprintf("pull config found config: %+v, lastNum: %d", config, lastNum))
@@ -231,6 +237,7 @@ func (kv *ShardKV) pullConfig() {
 				if len(kv.waitShardIds) == 0 && kv.config.Num + 1 == config.Num {
 					kv.log(fmt.Sprintf("pull config start config: %+v, lastNum: %d", config, lastNum))
 					kv.unlock("pullConfig")
+					// 向底层raft系统发送配置命令日志，使整个group的server达成一致并更新自己知道的最新配置
 					kv.rf.Start(config.Copy())
 				} else {
 					kv.unlock("pullConfig")
@@ -250,6 +257,7 @@ func (kv *ShardKV) configReady(configNum int, key string) Err {
 
 	shardId := key2shard(key)
 
+	// 这个分片不是属于当前group管理的
 	if _, ok := kv.ownShards[shardId]; !ok {
 		kv.log("configReadyerr2")
 		return ErrWrongGroup

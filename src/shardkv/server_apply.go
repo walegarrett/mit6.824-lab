@@ -113,7 +113,7 @@ func (kv *ShardKV) dataGet(key string) (err Err, val string) {
 	}
 }
 
-// 将配置应用到本地服务器
+// 将参数中的新配置应用到本地服务器
 func (kv *ShardKV) applyConfig(msg raft.ApplyMsg, config shardmaster.Config) {
 	kv.lock("applyConfig")
 	defer kv.unlock("applyConfig")
@@ -144,6 +144,7 @@ func (kv *ShardKV) applyConfig(msg raft.ApplyMsg, config shardmaster.Config) {
 		if config.Shards[i] == kv.gid {
 			ownshardIds = append(ownshardIds, i)
 			if oldConfig.Shards[i] != kv.gid {
+				// 本组中新增加的分片，需要注意的是，虽然分片被分配到了本组servers，但是分片数据没有更新到本地服务器
 				newShardIds = append(newShardIds, i)
 			}
 		} else {
@@ -157,7 +158,7 @@ func (kv *ShardKV) applyConfig(msg raft.ApplyMsg, config shardmaster.Config) {
 	// 遍历已经删除了的分片
 	for _, shardId := range deleteShardIds {
 		mergeShardData := MergeShardData {
-			ConfigNum: oldConfig.Num,
+			ConfigNum: oldConfig.Num, // 旧配置的ID
 			ShardNum: shardId,
 			Data: kv.data[shardId],
 			MsgIndexes: kv.lastMsgIdx[shardId],
@@ -176,7 +177,7 @@ func (kv *ShardKV) applyConfig(msg raft.ApplyMsg, config shardmaster.Config) {
 		kv.ownShards[shardId] = true
 	}
 
-	// 将本组中新增加的分片标记为等待分片
+	// 将本组中新增加的分片标记为等待重新分片
 	kv.waitShardIds = make(map[int]bool)
 	if oldConfig.Num != 0 {
 		for _, shardId := range newShardIds {
@@ -191,7 +192,7 @@ func (kv *ShardKV) applyConfig(msg raft.ApplyMsg, config shardmaster.Config) {
 	kv.saveSnapshot(msg.CommandIndex)
 }
 
-// 修改本服务器中新增的分片的所有key/value数据
+// 增加本服务器中新增分片的所有key/value数据
 func (kv *ShardKV) applyMergeShardData(msg raft.ApplyMsg, data MergeShardData) {
 	kv.lock("applyMergeShardData")
 	defer kv.unlock("applyMergeShardData")
@@ -219,6 +220,7 @@ func (kv *ShardKV) applyMergeShardData(msg raft.ApplyMsg, data MergeShardData) {
 		kv.lastMsgIdx[data.ShardNum][k] = v
 	}
 
+	// 等待更新数据的新分片已经被填充新数据了，将其从map中删除，表示不能重复查询和填充数据
 	delete(kv.waitShardIds, data.ShardNum)
 
 	go kv.reqCleanShardData(kv.oldConfig, data.ShardNum)
