@@ -61,6 +61,7 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	kv.log(fmt.Sprintf("in rpc putappend, args: %+v, reply: %+v", args, reply))
 }
 
+// 向底层raft系统发送操作命令，等待apply成功的通知
 func (kv *ShardKV) waitCmd(op Op) (res NotifyMsg) {
 	kv.log("waitcmd func enter")
 	ch := make(chan NotifyMsg, 1)
@@ -76,6 +77,7 @@ func (kv *ShardKV) waitCmd(op Op) (res NotifyMsg) {
 	}
 	kv.unlock("waitCmd")
 
+	// 向底层raft系统发送响应的操作命令，使集群对指定的操作达成一致
 	index, term, isLeader := kv.rf.Start(op)
 	if !isLeader {
 		res.Err = ErrWrongLeader

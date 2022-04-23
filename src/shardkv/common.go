@@ -13,6 +13,7 @@ import "6.824/labgob"
 // You will have to modify these definitions.
 //
 
+// call labgob.Register on structures you want Go's RPC library to marshall/unmarshall.
 func init() {
 	labgob.Register(PutAppendArgs{})
 	labgob.Register(PutAppendReply{})
@@ -123,6 +124,7 @@ type CleanShardDataArgs struct {
 	 Success bool
  }
 
+ // 某个分片的详细数据，包括key/value
  type MergeShardData struct {
 	 ConfigNum int
 	 ShardNum int
