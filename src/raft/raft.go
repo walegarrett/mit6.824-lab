@@ -70,7 +70,7 @@ type ApplyMsg struct {
 // 日志条目的定义
 type LogEntry struct {
 	Term int // 当前log的任期
-	Idx int // 当前日志条目在日志条目集中的索引，注意，这个日志条目不一定在logEntries数组中，因为有可能系统进行了快照
+	Idx int // 当前日志条目在日志条目集中的索引(这个索引是加上快照后的真正索引)，换句话说，这个日志条目不一定在logEntries数组中，因为有可能系统进行了快照
 	Command interface{} // 当前log中存储的应用层命令
 }
 
@@ -96,7 +96,7 @@ type Raft struct {
 	logEntries []LogEntry // 日志条目集
 
 	// server的两个易失属性
-	commitIndex int // 已知的最大的已经被提交的日志条目索引号
+	commitIndex int // 已知的最大的已经被提交的日志条目索引号，这个值需要确认系统中大部分服务器都已经收到了这个索引及之前的所有日志条目才能更新
 	lastApplied int // 当前server被应用到状态机的日志条目索引号
 
 	// 当前server作为领导人有的两个易失属性
@@ -104,8 +104,8 @@ type Raft struct {
 	matchIndex []int // 对于每一个服务器，已经复制给他的日志的最高索引值
 
 	// 用于snapshot的属性
-	lastSnapshotIndex int // 快照中的index
-	lastSnapshotTerm int // 快照中的term
+	lastSnapshotIndex int // 最后一个快照的真正index，最后一个快照的日志条目存放在logEntries[0]的位置
+	lastSnapshotTerm int // 最后一个快照的term
 
 	// 相关定时器的定义
 	electionTimer *time.Timer
@@ -313,7 +313,8 @@ func (rf *Raft) startApplyLogs() {
 		msgs = make([]ApplyMsg, 0)
 	} else {
 		rf.log("rfapply")
-		msgs = make([]ApplyMsg, 0, rf.commitIndex-rf.lastApplied)
+		// lastApplied+1即上次apply的索引到commitIndex索引的位置是需要进行apply，这可以保证自上次apply以来的新命令不会丢失apply
+		msgs = make([]ApplyMsg, 0, rf.commitIndex - rf.lastApplied)
 		for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
 			msgs = append(msgs, ApplyMsg{
 				CommandValid: true,
@@ -325,9 +326,12 @@ func (rf *Raft) startApplyLogs() {
 	rf.unlock("applyLogsPhase1")
 
 	for _, msg := range msgs {
+		// 向applyCh通道写入apply的命令，向上层的应用系统发出apply的命令，应用操作到它们各自的本地数据中
 		rf.applyCh <- msg
+
 		rf.lock("applyLogsPhase2")
 		rf.log("send applych idx:%d", msg.CommandIndex)
+		// 更新lastApplied索引的值，表示在这个索引之前的操作命令都发送给应用层进行apply了
 		rf.lastApplied = msg.CommandIndex
 		rf.unlock("applyLogsPhase2")
 	}

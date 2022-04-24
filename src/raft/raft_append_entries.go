@@ -99,6 +99,7 @@ func (rf *Raft) appendEntriesToPeer(peerIdx int) {
 			return
 		}
 
+		// append 成功
 		if reply.Success {
 			if reply.NextIndex > rf.nextIndex[peerIdx] {
 				rf.nextIndex[peerIdx] = reply.NextIndex
@@ -120,6 +121,7 @@ func (rf *Raft) appendEntriesToPeer(peerIdx int) {
 				rf.unlock("appendToPeerPhase2")
 				continue
 			} else {
+				// 此时其他follower的日志太落后于当前leader了
 				// peer的log快照短于leader通过appendEntries rpc发给它的内容，leader会将自己的快照发给follower
 				go rf.sendInstallSnapshot(peerIdx)
 				rf.unlock("appendToPeerPhase2")
@@ -188,8 +190,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		// 尝试跳过一个term
 		term := rf.logEntries[rf.getRealIdxByLogIndex(args.PrevLogIndex)].Term
 		idx := args.PrevLogIndex
-		for idx > rf.commitIndex && idx > rf.lastSnapshotIndex && 
-			rf.logEntries[rf.getRealIdxByLogIndex(idx)].Term == term {
+		for idx > rf.commitIndex && idx > rf.lastSnapshotIndex && rf.logEntries[rf.getRealIdxByLogIndex(idx)].Term == term {
 			idx -= 1
 		}
 		reply.NextIndex = idx + 1
@@ -270,6 +271,7 @@ func (rf *Raft) updateCommitIndex() {
 		for _, m := range rf.matchIndex {
 			if m >= i {
 				count += 1
+				// 确保raft系统中一半以上的server都确认收到了这个日志条目，则更新本服务器中的commitIndex值
 				if count > len(rf.peers) / 2 {
 					rf.commitIndex = i
 					hasCommit = true
@@ -278,12 +280,13 @@ func (rf *Raft) updateCommitIndex() {
 				}
 			}
 		}
+		// 一轮下来发现没有可以更新的commitIndex则退出，没有必要继续增大尝试的索引了，因为raft系统的大部分服务器还没有收到一致的日志
 		if rf.commitIndex != i {
 			break
 		}
 	}
 
-	// 确定leader已经commit了
+	// 确定leader已经commit了，此时可以通知应用层进行apply了
 	if hasCommit {
 		rf.notifyApplyCh <- struct{}{}
 	}
