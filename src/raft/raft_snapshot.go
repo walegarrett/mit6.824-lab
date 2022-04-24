@@ -24,6 +24,7 @@ type InstallSnapshotReply struct {
 	Term int // 当前任期号，便于领导人更新自己
 }
 
+// 持久化应用层的数据和raft系统中本server需要持久化的任期等数据，生成快照
 func (rf *Raft) SavePersistAndSnapshot(logIndex int, snapshotData []byte) {
 	rf.lock("save persist snapshot")
 	rf.log("save persist snapshot logindex:%d", logIndex)
@@ -41,12 +42,13 @@ func (rf *Raft) SavePersistAndSnapshot(logIndex int, snapshotData []byte) {
 			logIndex, rf.lastSnapshotIndex, len(rf.logEntries), rf.logEntries)
 	
 	lastLog := rf.getLogByIndex(logIndex)
-	rf.logEntries = rf.logEntries[rf.getRealIdxByLogIndex(logIndex):]
+	rf.logEntries = rf.logEntries[rf.getRealIdxByLogIndex(logIndex):] // logindex之前的log日志都被持久化了，成为了快照
 	rf.lastSnapshotIndex = logIndex
 	rf.lastSnapshotTerm = lastLog.Term
 	persistData := rf.GetPersistData()
 	rf.persister.SaveStateAndSnapshot(persistData, snapshotData)
 }
+
 // server处理leader发送的install snapshot请求
 func (rf *Raft) InstallSnapshot(args *InstallSnapshoArgs, reply *InstallSnapshotReply) {
 	rf.lock("install snapshot")
@@ -58,6 +60,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshoArgs, reply *InstallSnapshot
 		return
 	}
 
+	// 发送者的任期更大，表明发送者是leader，需要更换自己的角色为follower
 	if args.Term > rf.term || rf.role != Follower {
 		rf.term = args.Term
 		rf.changeRole(Follower)
@@ -65,6 +68,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshoArgs, reply *InstallSnapshot
 		defer rf.persist()
 	}
 
+	// 本机的快照更新，发送者发送过来的快照更旧，无法用于更新本server的快照
 	if rf.lastSnapshotIndex >= args.LastIncludeIndex {
 		return
 	}
@@ -74,11 +78,12 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshoArgs, reply *InstallSnapshot
 		// 一般不可能出现这种情况
 		log.Fatal("install snapshot")
 	} else if start >= len(rf.logEntries) {
+		// 此时本server日志落后leader太多了，需要覆盖本server的全部日志条目，将leader的快照索引保存下来
 		rf.logEntries = make([]LogEntry, 1)
 		rf.logEntries[0].Term = args.LastIncludeTerm
 		rf.logEntries[0].Idx = args.LastIncludeIndex
 	} else {
-		// 在指定偏移量写入数据
+		// 丢弃start之前落后的日志，但之后的日志保留下来
 		rf.logEntries = rf.logEntries[start:]
 	}
 
@@ -87,7 +92,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshoArgs, reply *InstallSnapshot
 	rf.persister.SaveStateAndSnapshot(rf.GetPersistData(), args.Data)
 }
 
-// 发送快照给指定的server
+// 发送快照给指定的server，领导人使用一种叫做InstallSnapshot的新的 RPC 来发送快照给太落后的跟随者
 func (rf *Raft) sendInstallSnapshot(peerIdx int){
 	rf.lock("send install snapshot")
 	args := InstallSnapshoArgs{
@@ -135,6 +140,7 @@ func (rf *Raft) sendInstallSnapshot(peerIdx int){
 			return
 		}
 
+		// 其他server的任期更大，表示自己肯定不可能是leader，需要转换身份为follower
 		if reply.Term > rf.term {
 			rf.changeRole(Follower)
 			rf.resetElectionTimer()
