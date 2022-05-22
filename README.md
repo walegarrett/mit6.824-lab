@@ -30,6 +30,4 @@ all-labs分支：四个实验整合在一起的最终版本代码
 
 [mit-6.824实验说明](https://pdos.csail.mit.edu/6.824/labs/guidance.html)
 
-[mit-6.824课程视频翻译](https://mit-public-courses-cn-translatio.gitbook.io/mit6-824/)
-
 [B站中文字幕视频](https://www.bilibili.com/video/BV1x7411M7Sf?spm_id_from=333.337.search-card.all.click)
